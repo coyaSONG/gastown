@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -461,27 +462,16 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		status.HasWork = true
 		status.PinnedBead = hookBead
 
-		// Check for attached molecule
-		attachment := beads.ParseAttachmentFields(hookBead)
-		if attachment != nil {
-			status.AttachedMolecule = attachment.AttachedMolecule
-			status.AttachedFormula = attachment.AttachedFormula
-			status.AttachedAt = attachment.AttachedAt
-			status.AttachedArgs = attachment.AttachedArgs
-			status.AttachedVars = attachment.AttachedVars
+		populateHookedWorkMetadata(&status, hookBead)
 
-			status.IsWisp = strings.Contains(hookBead.Description, "wisp: true") ||
-				strings.Contains(hookBead.Description, "is_wisp: true")
-
-			if attachment.AttachedMolecule != "" {
-				progress, _ := getMoleculeProgressInfo(b, attachment.AttachedMolecule)
-				status.Progress = progress
-				status.NextAction = determineNextAction(status)
-			} else if attachment.AttachedFormula != "" {
-				progress, _ := getMoleculeProgressInfo(b, hookBead.ID)
-				status.Progress = progress
-				status.NextAction = determineNextAction(status)
-			}
+		if status.AttachedMolecule != "" {
+			progress, _ := getMoleculeProgressInfo(b, status.AttachedMolecule)
+			status.Progress = progress
+			status.NextAction = determineNextAction(status)
+		} else if status.AttachedFormula != "" {
+			progress, _ := getMoleculeProgressInfo(b, hookBead.ID)
+			status.Progress = progress
+			status.NextAction = determineNextAction(status)
 		}
 	}
 
@@ -504,6 +494,38 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 	// Human-readable output
 	outputMoleculeStatus(status)
 	return nil
+}
+
+// populateHookedWorkMetadata reads explicit attachment fields first, then
+// recognizes patrol roots by the same title-prefix convention used by patrol
+// discovery. Patrol wisps intentionally have no attached_molecule: the root is
+// the formula work, so treating them as naked beads would suggest a mol attach
+// command that only accepts pinned handoff beads.
+func populateHookedWorkMetadata(status *MoleculeStatusInfo, hookBead *beads.Issue) {
+	if status == nil || hookBead == nil {
+		return
+	}
+
+	if attachment := beads.ParseAttachmentFields(hookBead); attachment != nil {
+		status.AttachedMolecule = attachment.AttachedMolecule
+		status.AttachedFormula = attachment.AttachedFormula
+		status.AttachedAt = attachment.AttachedAt
+		status.AttachedArgs = attachment.AttachedArgs
+		status.AttachedVars = attachment.AttachedVars
+		status.IsWisp = strings.Contains(hookBead.Description, "wisp: true") ||
+			strings.Contains(hookBead.Description, "is_wisp: true")
+	}
+
+	if status.AttachedFormula != "" || status.AttachedMolecule != "" {
+		return
+	}
+	for _, formulaName := range constants.PatrolFormulas() {
+		if strings.HasPrefix(hookBead.Title, formulaName) {
+			status.AttachedFormula = formulaName
+			status.IsWisp = true
+			return
+		}
+	}
 }
 
 // extractRoleFromIdentity extracts the role name from an agent identity string
