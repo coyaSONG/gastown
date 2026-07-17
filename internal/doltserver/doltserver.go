@@ -3520,7 +3520,7 @@ func EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, doltDatabase 
 		effectiveDB = doltDatabase[0]
 	}
 
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
 		return fmt.Errorf("creating beads directory: %w", err)
 	}
 

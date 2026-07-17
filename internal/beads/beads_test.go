@@ -25,6 +25,15 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestProvisionPrimeMDCreatesPrivateBeadsDirectory(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := ProvisionPrimeMD(beadsDir); err != nil {
+		t.Fatalf("ProvisionPrimeMD: %v", err)
+	}
+
+	assertPrivateDirectory(t, beadsDir)
+}
+
 // TestListOptions verifies ListOptions defaults.
 func TestListOptions(t *testing.T) {
 	opts := ListOptions{

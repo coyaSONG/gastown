@@ -3,11 +3,36 @@ package beads
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
+
+func assertPrivateDirectory(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX directory permissions")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat directory: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("directory permissions = %04o, want 0700", got)
+	}
+}
+
+func TestWriteRoutesCreatesPrivateBeadsDirectory(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := WriteRoutes(beadsDir, []Route{{Prefix: "gt-", Path: "gastown"}}); err != nil {
+		t.Fatalf("WriteRoutes: %v", err)
+	}
+
+	assertPrivateDirectory(t, beadsDir)
+}
 
 func TestGetPrefixForRig(t *testing.T) {
 	// Create a temporary directory with routes.jsonl

@@ -591,6 +591,7 @@ func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	if string(content) != expected {
 		t.Errorf("redirect content = %q, want %q", string(content), expected)
 	}
+	assertPrivateBeadsDirectory(t, filepath.Join(rigPath, ".beads"))
 
 	// Verify no local database was created (no config.yaml at rig level)
 	rigConfigPath := filepath.Join(rigPath, ".beads", "config.yaml")
@@ -639,6 +640,22 @@ exit 0
 	beadsDir := filepath.Join(rigPath, ".beads")
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		t.Errorf("expected .beads directory to be created")
+	}
+	assertPrivateBeadsDirectory(t, beadsDir)
+}
+
+func assertPrivateBeadsDirectory(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX directory permissions")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat beads directory: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("directory permissions = %04o, want 0700", got)
 	}
 }
 

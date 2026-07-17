@@ -45,6 +45,26 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
+func TestEnsureMetadataForBeadsDirCreatesPrivateDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX directory permissions")
+	}
+
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, "rig", ".beads")
+	if err := EnsureMetadataForBeadsDir(townRoot, beadsDir, "rig"); err != nil {
+		t.Fatalf("EnsureMetadataForBeadsDir: %v", err)
+	}
+
+	info, err := os.Stat(beadsDir)
+	if err != nil {
+		t.Fatalf("stat beads directory: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("directory permissions = %04o, want 0700", got)
+	}
+}
+
 func TestDirSize(t *testing.T) {
 	tmpDir := t.TempDir()
 
