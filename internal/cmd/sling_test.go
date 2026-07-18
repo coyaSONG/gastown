@@ -4770,6 +4770,91 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 	}
 }
 
+func TestResolveSlingPRBranchUsesTargetRigRepository(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"version":1}`), 0644); err != nil {
+		t.Fatalf("write town marker: %v", err)
+	}
+
+	rigRepo := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	if err := os.MkdirAll(rigRepo, 0755); err != nil {
+		t.Fatalf("mkdir target rig repo: %v", err)
+	}
+	rigs := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{
+		"gastown": {
+			GitURL:  "git@github.com:test/gastown.git",
+			AddedAt: time.Now().Truncate(time.Second),
+		},
+	}}
+	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), rigs); err != nil {
+		t.Fatalf("SaveRigsConfig: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	ghCWDPath := filepath.Join(townRoot, "gh-cwd.txt")
+	ghArgsPath := filepath.Join(townRoot, "gh-args.txt")
+	if runtime.GOOS == "windows" {
+		script := "@echo off\r\ncd > %GT_TEST_GH_CWD%\r\necho %* > %GT_TEST_GH_ARGS%\r\necho feature/pr-4377\r\n"
+		if err := os.WriteFile(filepath.Join(binDir, "gh.cmd"), []byte(script), 0644); err != nil {
+			t.Fatalf("write gh stub: %v", err)
+		}
+	} else {
+		script := "#!/bin/sh\npwd > \"$GT_TEST_GH_CWD\"\nprintf '%s\\n' \"$@\" > \"$GT_TEST_GH_ARGS\"\nprintf 'feature/pr-4377\\n'\n"
+		if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(script), 0755); err != nil {
+			t.Fatalf("write gh stub: %v", err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GT_TEST_GH_CWD", ghCWDPath)
+	t.Setenv("GT_TEST_GH_ARGS", ghArgsPath)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir town root: %v", err)
+	}
+
+	branch, err := resolveSlingPRBranch(4377, townRoot, []string{"gt-pr4377-refresh", "gastown"})
+	if err != nil {
+		t.Fatalf("resolveSlingPRBranch: %v", err)
+	}
+	if branch != "feature/pr-4377" {
+		t.Fatalf("branch = %q, want feature/pr-4377", branch)
+	}
+
+	ghCWD, err := os.ReadFile(ghCWDPath)
+	if err != nil {
+		t.Fatalf("read gh cwd: %v", err)
+	}
+	gotCWD := filepath.Clean(strings.TrimSpace(string(ghCWD)))
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(gotCWD, filepath.Clean(rigRepo)) {
+			t.Fatalf("gh cwd = %q, want target rig repo %q", gotCWD, rigRepo)
+		}
+	} else if gotCWD != filepath.Clean(rigRepo) {
+		t.Fatalf("gh cwd = %q, want target rig repo %q", gotCWD, rigRepo)
+	}
+
+	ghArgs, err := os.ReadFile(ghArgsPath)
+	if err != nil {
+		t.Fatalf("read gh args: %v", err)
+	}
+	for _, want := range []string{"pr", "view", "4377", "headRefName"} {
+		if !strings.Contains(string(ghArgs), want) {
+			t.Fatalf("gh args %q missing %q", ghArgs, want)
+		}
+	}
+}
+
 // TestSlingStandaloneFormulaInDeferredMode is a regression test for gh#3917.
 //
 // When scheduler.max_polecats > 0 (deferred dispatch mode), `gt sling <formula> <rig>`

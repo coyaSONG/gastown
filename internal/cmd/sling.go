@@ -245,15 +245,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if (slingResumeBranch != "" || slingResumePR != 0) && slingBaseBranch != "" {
 		return fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
 	}
-	if slingResumePR != 0 {
-		resolved, err := resolvePRBranch(slingResumePR)
-		if err != nil {
-			return fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
-		}
-		slingResumeBranch = resolved
-		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
-	}
-
 	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
 	// Under concurrent load (batch slinging), auto-commits from individual bd writes
 	// cause manifest contention and 'database is read only' errors. The Dolt server
@@ -301,6 +292,15 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Note: Internal agent IDs like "mayor/" are outputs, not user inputs.
 	for i := range args {
 		args[i] = strings.TrimRight(args[i], "/")
+	}
+
+	if slingResumePR != 0 {
+		resolved, err := resolveSlingPRBranch(slingResumePR, townRoot, args)
+		if err != nil {
+			return fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
+		}
+		slingResumeBranch = resolved
+		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
 	}
 
 	// --crew flag: expand target from "<rig>" to "<rig>/crew/<name>"
@@ -1342,11 +1342,25 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	return nil, fmt.Errorf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", targetAgent, maxAttempts*retryInterval/1000)
 }
 
+// resolveSlingPRBranch resolves a PR from the explicitly targeted rig repository.
+// Targets without a registered rig retain the existing caller-cwd behavior.
+func resolveSlingPRBranch(prNumber int, townRoot string, args []string) (string, error) {
+	repoDir := ""
+	if len(args) > 1 {
+		targetRig := strings.SplitN(args[len(args)-1], "/", 2)[0]
+		if rigName, ok := IsRigName(targetRig); ok {
+			repoDir = filepath.Join(townRoot, rigName, "mayor", "rig")
+		}
+	}
+	return resolvePRBranch(prNumber, repoDir)
+}
+
 // resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.
 // Used by `gt sling --pr <number>` to convert the PR number into a branch name that
 // the polecat worktree can check out.
-func resolvePRBranch(prNumber int) (string, error) {
+func resolvePRBranch(prNumber int, repoDir string) (string, error) {
 	cmd := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "headRefName", "-q", ".headRefName")
+	cmd.Dir = repoDir
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
