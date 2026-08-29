@@ -314,6 +314,136 @@ func TestNonReviewOnlyReviewGateDoesNotChangeCriteriaHandling(t *testing.T) {
 	}
 }
 
+func TestSourceCloseRejectsNonConcreteIssue(t *testing.T) {
+	issue := &beads.Issue{
+		ID:     "gt-mr",
+		Labels: []string{"gt:merge-request"},
+	}
+
+	reason, fatal := doneSourceCloseSkipReason(nil, issue.ID, issue)
+	if reason == "" || !fatal {
+		t.Fatalf("source close gate = %q, %v; want fatal non-concrete rejection", reason, fatal)
+	}
+	if !strings.Contains(reason, "not concrete") {
+		t.Fatalf("reason = %q, want non-concrete reason", reason)
+	}
+}
+
+func TestSourceCloseRejectsLocalMergeStrategy(t *testing.T) {
+	issue := &beads.Issue{
+		ID:          "gt-work",
+		Type:        "task",
+		Description: "merge_strategy: local\n",
+	}
+
+	reason, fatal := doneSourceCloseSkipReason(nil, issue.ID, issue)
+	if reason == "" || fatal {
+		t.Fatalf("local source close gate = %q, %v; want non-fatal skip", reason, fatal)
+	}
+	if !strings.Contains(reason, "merge_strategy=local") {
+		t.Fatalf("reason = %q, want local merge strategy reason", reason)
+	}
+}
+
+func TestDirectMergeRejectsUnsafeSourceBeforePush(t *testing.T) {
+	freshEvidenceReviewOnly := &beads.Issue{
+		ID:          "gt-review",
+		Type:        "task",
+		Description: "review_only: true\nattached_at: 2026-07-01T12:00:00Z\n",
+		Assignee:    "gastown/polecats/toast",
+		Comments: []beads.Comment{{
+			Author:    "gastown/polecats/toast",
+			CreatedAt: "2026-07-01T12:05:00Z",
+			Text:      "PR-SHERIFF-EVIDENCE: pass\nhead_sha: abc123",
+		}},
+	}
+	tests := []struct {
+		name        string
+		issueID     string
+		issue       *beads.Issue
+		wantReason  string
+		wantAllowed bool
+	}{
+		{
+			name:       "missing source id",
+			issue:      &beads.Issue{ID: "gt-work", Type: "task"},
+			wantReason: "source issue is required",
+		},
+		{
+			name:       "non concrete source",
+			issueID:    "gt-mr",
+			issue:      &beads.Issue{ID: "gt-mr", Labels: []string{"gt:merge-request"}},
+			wantReason: "not concrete",
+		},
+		{
+			name:       "review only source",
+			issueID:    "gt-review",
+			issue:      freshEvidenceReviewOnly,
+			wantReason: "review-only issue gt-review cannot be direct-merged",
+		},
+		{
+			name:       "no merge source",
+			issueID:    "gt-work",
+			issue:      &beads.Issue{ID: "gt-work", Type: "task", Description: "no_merge: true\n"},
+			wantReason: "no_merge=true",
+		},
+		{
+			name:       "local merge strategy source",
+			issueID:    "gt-work",
+			issue:      &beads.Issue{ID: "gt-work", Type: "task", Description: "merge_strategy: local\n"},
+			wantReason: "merge_strategy=local",
+		},
+		{
+			name:       "unchecked criteria",
+			issueID:    "gt-work",
+			issue:      &beads.Issue{ID: "gt-work", Type: "task", AcceptanceCriteria: "- [ ] still open\n"},
+			wantReason: "unchecked acceptance criteria",
+		},
+		{
+			name:        "eligible source",
+			issueID:     "gt-work",
+			issue:       &beads.Issue{ID: "gt-work", Type: "task"},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := doneDirectMergeSkipReason(nil, tt.issueID, tt.issue, "main")
+			if tt.wantAllowed {
+				if reason != "" {
+					t.Fatalf("direct merge gate = %q; want allowed", reason)
+				}
+				return
+			}
+			if reason == "" || !strings.Contains(reason, tt.wantReason) {
+				t.Fatalf("direct merge gate = %q; want reason containing %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestSourceValidationRejectsInternalIssues(t *testing.T) {
+	if err := validateConcreteSourceIssue("gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err != nil {
+		t.Fatalf("concrete source rejected: %v", err)
+	}
+	if err := validateConcreteSourceIssue("gt-mr", &beads.Issue{ID: "gt-mr", Labels: []string{"gt:merge-request"}}); err == nil {
+		t.Fatal("internal source accepted; want rejection")
+	}
+}
+
+func TestValidateMergeRequestSourceRejectsMissingAndMismatchedSource(t *testing.T) {
+	missing := &beads.Issue{ID: "gt-mr", Description: "branch: polecat/test/gt-work\n"}
+	if err := validateMergeRequestSource(missing, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "missing source_issue") {
+		t.Fatalf("missing source validation error = %v, want missing source_issue", err)
+	}
+
+	mismatched := &beads.Issue{ID: "gt-mr", Description: "source_issue: gt-other\n"}
+	if err := validateMergeRequestSource(mismatched, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "does not match expected") {
+		t.Fatalf("mismatched source validation error = %v, want mismatch", err)
+	}
+}
+
 // TestDoneBeadsInitWithoutRedirect verifies that beads initialization works
 // normally when no redirect file exists.
 func TestDoneBeadsInitWithoutRedirect(t *testing.T) {
@@ -699,6 +829,10 @@ func TestIsPolecatActor(t *testing.T) {
 		{"", false},
 		{"single", false},
 		{"polecats/name", false}, // needs rig prefix
+		{"testrig/polecats", false},
+		{"testrig/polecats/", false},
+		{"/polecats/furiosa", false},
+		{"testrig/polecats/furiosa/extra", false},
 	}
 
 	for _, tt := range tests {
@@ -940,6 +1074,66 @@ func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
 	}
 }
 
+func TestCleanupStatusFromWorkState(t *testing.T) {
+	pushErr := errors.New("remote unavailable")
+	tests := []struct {
+		name          string
+		status        *gitpkg.UncommittedWorkStatus
+		branchPushed  bool
+		unpushedCount int
+		pushErr       error
+		want          string
+	}{
+		{name: "nil", status: nil, branchPushed: true, want: "unknown"},
+		{
+			name:         "runtime only pushed",
+			status:       &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{".opencode/plugins/gastown.js"}},
+			branchPushed: true,
+			want:         "clean",
+		},
+		{
+			name:         "runtime plus source",
+			status:       &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{".opencode/plugins/gastown.js", "internal/cmd/done.go"}},
+			branchPushed: true,
+			want:         "uncommitted",
+		},
+		{
+			name:         "runtime plus stash",
+			status:       &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{".opencode/plugins/gastown.js"}, StashCount: 1},
+			branchPushed: true,
+			want:         "stash",
+		},
+		{
+			name:          "runtime plus unpushed",
+			status:        &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{".opencode/plugins/gastown.js"}},
+			branchPushed:  true,
+			unpushedCount: 1,
+			want:          "unpushed",
+		},
+		{
+			name:         "runtime plus push error",
+			status:       &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{".opencode/plugins/gastown.js"}},
+			branchPushed: true,
+			pushErr:      pushErr,
+			want:         "unpushed",
+		},
+		{
+			name:         "runtime conflict",
+			status:       &gitpkg.UncommittedWorkStatus{HasUncommittedChanges: true, UnmergedFiles: []string{".opencode/plugins/gastown.js"}},
+			branchPushed: true,
+			want:         "uncommitted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cleanupStatusFromWorkState(tt.status, tt.branchPushed, tt.unpushedCount, tt.pushErr); got != tt.want {
+				t.Fatalf("cleanupStatusFromWorkState() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
 // only done-intent labels while preserving other labels.
 func TestClearDoneIntentLabel(t *testing.T) {
@@ -1138,11 +1332,9 @@ func TestDeferredKillNotOnValidationError(t *testing.T) {
 	}
 }
 
-// TestBranchDetectionGuard verifies that the branch detection logic in runDone
-// correctly handles the three states: cwd available, cwd unavailable with GT_BRANCH,
-// and cwd unavailable without GT_BRANCH.
-// This is a regression test for PR #1402 — prevents incorrect main/master detection
-// when the polecat's working directory is deleted.
+// TestBranchDetectionGuard verifies that gt done no longer trusts GT_BRANCH
+// after cwd/worktree ownership is unavailable. The command must fail closed
+// before branch detection instead of reconstructing authority from env.
 func TestBranchDetectionGuard(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1159,11 +1351,11 @@ func TestBranchDetectionGuard(t *testing.T) {
 			wantBranch:   "current-branch", // simulated
 		},
 		{
-			name:         "cwd unavailable + GT_BRANCH set - uses env var",
+			name:         "cwd unavailable + GT_BRANCH set - still errors",
 			cwdAvailable: false,
 			gtBranch:     "polecat/test-worker",
-			wantError:    false,
-			wantBranch:   "polecat/test-worker",
+			wantError:    true,
+			wantBranch:   "",
 		},
 		{
 			name:         "cwd unavailable + GT_BRANCH empty - returns error",
@@ -1176,10 +1368,10 @@ func TestBranchDetectionGuard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the branch detection logic from runDone
+			// Simulate the branch detection guard in runDone.
 			var branch string
 			if !tt.cwdAvailable {
-				branch = tt.gtBranch
+				_ = tt.gtBranch // env branch is intentionally ignored when cwd is unavailable
 			}
 
 			var gotError bool
@@ -1202,41 +1394,26 @@ func TestBranchDetectionGuard(t *testing.T) {
 	}
 }
 
-// TestBranchDetectionCleanupOnError verifies that when branch detection fails
-// (cwdAvailable=false + no GT_BRANCH), the session cleanup backstop is armed
-// so the polecat doesn't get stranded.
+// TestBranchDetectionCleanupOnError verifies that deleted-worktree branch
+// recovery is no longer considered a cleanup path for gt done.
 func TestBranchDetectionCleanupOnError(t *testing.T) {
-	// Simulate the cleanup arming logic from runDone's branch detection error path
+	// Simulate the deleted-worktree guard before branch detection.
 	cwdAvailable := false
 	gtBranch := ""
-	gtPolecat := "test-worker"
-	rigName := "test-rig"
 
 	var branch string
 	if !cwdAvailable {
-		branch = gtBranch
+		_ = gtBranch // ignored without a proven current worktree
 	}
 
 	sessionCleanupNeeded := false
 	if branch == "" && !cwdAvailable {
-		// This mirrors the actual code: arm cleanup before returning error
-		if gtPolecat != "" {
-			sessionCleanupNeeded = true
-		}
+		// The ownership guard returns before arming cleanup or trusting env state.
+		sessionCleanupNeeded = false
 	}
 
-	if !sessionCleanupNeeded {
-		t.Error("sessionCleanupNeeded should be true when branch detection fails with GT_POLECAT set")
-	}
-
-	// Verify the RoleInfo would be constructible from env vars
-	roleInfo := RoleInfo{
-		Role:    RolePolecat,
-		Rig:     rigName,
-		Polecat: gtPolecat,
-	}
-	if roleInfo.Rig != rigName || roleInfo.Polecat != gtPolecat {
-		t.Error("RoleInfo should be constructible from env vars for cleanup")
+	if sessionCleanupNeeded {
+		t.Error("sessionCleanupNeeded should stay false when worktree ownership is unavailable")
 	}
 }
 

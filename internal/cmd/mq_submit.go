@@ -139,8 +139,15 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", branch)
 	}
 
-	// Initialize beads for looking up source issue
+	// Initialize current-rig beads for merge-request queue operations, then
+	// resolve the source through town-level routing for source-owned operations.
 	bd := beads.New(cwd)
+	sourceInfo, err := resolveSubmitSourceIssue(cwd, issueID)
+	if err != nil {
+		return fmt.Errorf("source issue validation failed: %w", err)
+	}
+	sourceBD := sourceInfo.BD
+	sourceIssue := sourceInfo.Issue
 
 	// Determine target branch
 	// Priority: explicit --epic > formula_vars base_branch > integration branch auto-detect > rig default.
@@ -148,19 +155,17 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	if mqSubmitEpic != "" {
 		// Explicit --epic flag: read stored branch name, fall back to template
 		rigPath := filepath.Join(townRoot, rigName)
-		target = resolveIntegrationBranchName(bd, rigPath, mqSubmitEpic)
+		target = resolveIntegrationBranchName(sourceBD, rigPath, mqSubmitEpic)
 	} else {
 		// Check for explicit --base-branch override in formula vars on the source issue.
 		// When gt sling dispatches with --base-branch, the value is persisted in
 		// the bead's formula_vars field. Without this check, MRs created via
 		// gt mq submit always target the rig's default branch (usually main),
 		// even when the polecat was working against a feature branch.
-		if sourceIssue, showErr := bd.Show(issueID); showErr == nil {
-			if af := beads.ParseAttachmentFields(sourceIssue); af != nil {
-				if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
-					target = bb
-					fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
-				}
+		if af := beads.ParseAttachmentFields(sourceIssue); af != nil {
+			if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
+				target = bb
+				fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
 			}
 		}
 
@@ -174,7 +179,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 				refineryEnabled = settings.MergeQueue.IsRefineryIntegrationEnabled()
 			}
 			if refineryEnabled {
-				autoTarget, err := beads.DetectIntegrationBranch(bd, g, issueID)
+				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
 				if err != nil {
 					// Non-fatal: log and continue with default branch as target
 					fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(note: %v)", err)))
@@ -187,20 +192,10 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 	// Get source issue for priority inheritance and dependency check
 	var priority int
-	var sourceIssue *beads.Issue
 	if mqSubmitPriority >= 0 {
 		priority = mqSubmitPriority
-	}
-	// Always try to fetch source issue (needed for both priority and dep check)
-	sourceIssue, err = bd.Show(issueID)
-	if err != nil {
-		if mqSubmitPriority < 0 {
-			priority = 2
-		}
 	} else {
-		if mqSubmitPriority < 0 {
-			priority = sourceIssue.Priority
-		}
+		priority = sourceIssue.Priority
 	}
 
 	// Enforce molecule step dependencies before allowing submit.
@@ -208,7 +203,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// steps are complete. This prevents polecats from skipping steps like
 	// self-review, build-check, or state-update.
 	if !mqSubmitSkipDeps && !mqSubmitResubmit && sourceIssue != nil {
-		if err := checkMoleculeStepDeps(bd, sourceIssue); err != nil {
+		if err := checkMoleculeStepDeps(sourceBD, sourceIssue); err != nil {
 			return err
 		}
 	}
@@ -252,6 +247,9 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	if existingMR != nil {
+		if err := validateMergeRequestSource(existingMR, issueID, sourceIssue); err != nil {
+			return fmt.Errorf("existing merge request validation failed: %w", err)
+		}
 		mrIssue = existingMR
 		fmt.Printf("%s MR already exists (idempotent)\n", style.Bold.Render("✓"))
 	} else {
@@ -279,7 +277,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		// GH#2599: Back-link source issue to MR bead for discoverability.
 		if issueID != "" {
 			comment := fmt.Sprintf("MR created: %s", mrIssue.ID)
-			if _, err := bd.Run("comments", "add", issueID, comment); err != nil {
+			if err := sourceBD.AddComment(issueID, comment); err != nil {
 				style.PrintWarning("could not back-link source issue %s to MR %s: %v", issueID, mrIssue.ID, err)
 			}
 		}
@@ -300,18 +298,8 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 					}
 					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
 
-					// Delete the old remote branch to auto-close the GitHub PR.
-					// Only polecat branches — non-polecat branches may belong to
-					// contributor forks; deleting them closes upstream PRs. (GH#2669)
-					oldFields := beads.ParseMRFields(old)
-					if oldFields != nil && strings.HasPrefix(oldFields.Branch, "polecat/") {
-						g := git.NewGit(cwd)
-						if err := g.DeleteRemoteBranch("origin", oldFields.Branch); err != nil {
-							style.PrintWarning("could not delete superseded branch %s: %v", oldFields.Branch, err)
-						} else {
-							fmt.Printf("  %s Deleted remote branch: %s\n", style.Dim.Render("○"), oldFields.Branch)
-						}
-					}
+					// Leave superseded remote branches intact. Branch deletion belongs to
+					// verified post-merge cleanup, not submit-time queue maintenance.
 				}
 			}
 		}
